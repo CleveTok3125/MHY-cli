@@ -30,7 +30,7 @@ class InputTools:
 			except KeyboardInterrupt:
 				print('\nUser canceled.')
 				OSManager.exit(0)
-			return
+		return
 
 	@staticmethod
 	def simple_yn(prompt: str, choices: list[tuple[str, ...], tuple[str, ...]] = [('no', 'n', 'false', '0'), ('yes', 'y', 'true', '1')], case_sensitive: bool = False, default_choice: bool = None):
@@ -106,7 +106,7 @@ class ApiParser:
 		self.json_response: dict = ApiHandler().send_request()
 		self.json_response = self.json_response['data']['game_packages']
 
-	def convert_bytes(self, byte_size: int) -> str:
+	def _convert_bytes(self, byte_size: int) -> str:
 		units = ['B', 'KB', 'MB', 'GB']
 
 		if not byte_size:
@@ -119,12 +119,12 @@ class ApiParser:
 
 		return f'{byte_size:.2f} {units[i]}'
 
-	def get_gamelist(self) -> dict:
+	def _get_gamelist(self) -> dict:
 		with open('gamelist.json', 'r', encoding='utf-8') as file:
 			return json.load(file)
 
 	def select_game(self) -> str:
-		gamelist: dict = self.get_gamelist()
+		gamelist: dict = self._get_gamelist()
 		list_of_id_games: list[str] = list(gamelist)
 		
 		print('Games available:')
@@ -147,11 +147,11 @@ class ApiParser:
 			return True
 		return False
 
-	def get_game_main(self, game_index: int, is_patches: bool) -> dict: # main or pre_download
+	def get_game_main(self, game_index: int, parse_game_version: callable) -> dict: # main or pre_download
 		if self.is_pre_download(game_index) and InputTools.simple_yn(prompt='Pre-download available. Pre-download? (Y/n) ', default_choice=True):
 			game_main: dict = self.json_response[game_index]['pre_download']
 
-			if not is_patches:
+			if parse_game_version == self.get_game_major:
 				print('\nNOTICE: To select patches for a specific update version, add the -p/--patches argument. Currently working with the full game.')
 		else:
 			game_main: dict = self.json_response[game_index]['main']
@@ -167,61 +167,69 @@ class ApiParser:
 		game_patches: dict = game_main['patches']
 
 		version_list: list = [f"({index+1}) {game_patches[index]['version']}" for index in range(len(game_patches))]
-		print(f'Available Versions:\n=> {'\n=> '.join(version_list)}')
+		version_print: str = '\n=> '.join(version_list)
 
-		previous_ver: int = InputTools.simple_select(data_type=int, prompt='Select current version: ', loop=True, response='Invalid input! Please enter a valid number.')
+		while True:
+			print(f'Available Versions:\n=> {version_print}')
 
-		if 0 > previous_ver or previous_ver > len(game_patches):
-			print(VersionNotFound('Requested version not found.'))
-			return self.get_game_patches(game_main=game_main)
+			previous_ver: int = InputTools.simple_select(data_type=int, prompt='Select current version: ', loop=True, response='Invalid input! Please enter a valid number.')
+
+			if 0 > previous_ver or previous_ver > len(game_patches):
+				print(VersionNotFound('Requested version not found.'))
+			else:
+				break
 
 		print(f'Selected: {version_list[previous_ver-1]}\n')
 		return game_patches[previous_ver-1]
 
+	def _print_pkg_info(self, total_size, total_decompressed_size, languages, audio_total_size, audio_total_decompressed_size):
+		print('Total size (game_pkgs):')
+		print(f'=> Compressed: {self._convert_bytes(total_size)}')
+		print(f'=> Decompressed: {self._convert_bytes(total_decompressed_size)}')
+
+		print(f'\nTotal size (audio_pkgs={languages}):')
+		print(f'=> Compressed: {self._convert_bytes(audio_total_size)}')
+		print(f'=> Decompressed: {self._convert_bytes(audio_total_decompressed_size)}\n')
+
 	def get_game_pkgs(self, game_major: dict, types: list = ['game_pkgs', 'audio_pkgs'], languages: list[str, ...] = ['en-us'], print_info: bool = False) -> list[tuple[str, int, str], ...]:
 		pkgs: list[dict] = [game_major.get(t) for t in set(types) if game_major.get(t)]
+		languages = set(languages)
 
 		total_size = total_decompressed_size = 0
 		audio_total_size = audio_total_decompressed_size = 0
 		lst_of_pkgs: list[tuple[str, int, str], ...] = []
 		for pkg in pkgs:
 			for pkg_info in pkg:
+
 				if print_info:
 					for key, value in pkg_info.items():
 						print(f'{key}: {value}')
 					print()
 
-				if 'language' in pkg_info:
-					if pkg_info['language'] in set(languages):
+				# The code below checks whether pkg_info should be added to lst_of_pkgs (download queue) or not
+				if 'language' in pkg_info:	# Check if pkg_info is information about an audio file. Determined by the existence of the 'language' key
+					if pkg_info['language'] in languages:	# If it is the audio file information of the requested language, add it to the download queue.
 						audio_total_size += int(pkg_info['size'])
 						audio_total_decompressed_size += int(pkg_info['decompressed_size'])
-					else:
+					else:	# If it is audio file information but not the requested language, do not add it to the download queue.
 						continue
-				else:
+				else: # If it's not an audio file info but a game file, add it to the download queue by default.
 					total_size += int(pkg_info['size'])
 					total_decompressed_size += int(pkg_info['decompressed_size'])
 
 				lst_of_pkgs.append((pkg_info['url'], int(pkg_info['size']), pkg_info['md5']))
 
-		if print_info:
-			print('Total size (game_pkgs):')
-			print(f'=> Compressed: {self.convert_bytes(total_size)}')
-			print(f'=> Decompressed: {self.convert_bytes(total_decompressed_size)}')
-
-			print(f'\nTotal size (audio_pkgs={languages}):')
-			print(f'=> Compressed: {self.convert_bytes(audio_total_size)}')
-			print(f'=> Decompressed: {self.convert_bytes(audio_total_decompressed_size)}')
-
+		self._print_pkg_info(total_size, total_decompressed_size, languages, audio_total_size, audio_total_decompressed_size)
 		return lst_of_pkgs
 
-	def main(self, patches: bool = False, types: list = ['game_pkgs', 'audio_pkgs'], languages: list[str, ...] = ['en-us'], print_info: bool = False) -> list[tuple[str, int, str], ...]:
+	def main(self, version: str = 'major', types: list = ['game_pkgs', 'audio_pkgs'], languages: list[str, ...] = ['en-us'], print_info: bool = False) -> list[tuple[str, int, str], ...]:
+		parse_game_version = self.get_game_major if version == 'major' else self.get_game_patches
+
 		game_id: str = self.select_game()
 		game_index: int = self.find_game(game_id)
-		game_main: dict = self.get_game_main(game_index, patches)
+		game_main: dict = self.get_game_main(game_index, parse_game_version)
 
-		version_selector = {True: self.get_game_patches, False: self.get_game_major}
-
-		game_major: dict = version_selector[patches](game_main)
+		game_major: dict = parse_game_version(game_main)
 
 		return self.get_game_pkgs(game_major, types=types, languages=languages, print_info=print_info)
 
@@ -253,6 +261,7 @@ class Downloader:
 			filename: str = url.split('/')[-1]
 			self.download_file(url=url, filename=filename, filesize=filesize)
 			file_hash.append((os.path.join(self.path, filename), md5))
+			print()	# Separate multiple downloads for easy viewing
 		return file_hash
 
 class CheckHash:
@@ -270,13 +279,16 @@ class CheckHash:
 
 	@staticmethod
 	def check_md5(filepath: str, expected_md5: str) -> bool:
-		print(f'Running CRC: {filepath}.', end='\n')
-		
+		print(f'\nRunning CRC: {filepath}.', end='\n')
+
 		try:
 			file_hash: str = CheckHash.calculate_md5(filepath)
 		except KeyboardInterrupt:
 			print('CRC canceled.')
 			OSManager.exit(0)
+		except FileNotFoundError:
+			print(f'Skip "{filepath}": file not found.')
+			return FileNotFoundError(f'{filepath}')
 
 		if file_hash.lower() == expected_md5.lower():
 			print('CRC OK!')
@@ -287,7 +299,7 @@ class CheckHash:
 class ArgsHandler:
 	def __init__(self):
 		parser: argparse.ArgumentParser = argparse.ArgumentParser()
-		parser.add_argument('-p', '--patches', action='store_true', help='select patch to update instead of full game', required=False)
+		parser.add_argument('-p', '--patches', action='store_const', const='patches', dest='version', default='major', help='select patch to update instead of full game', required=False)
 		parser.add_argument('-t', '--types', type=str, choices=['game_pkgs', 'audio_pkgs', 'all'], default='all', help='download options for the respective data types', required=False)
 		parser.add_argument('-l', '--languages', nargs='+', type=str, default=['en-us'], help='specify audio download language', required=False)
 		parser.add_argument('-i', '--info', action='store_true', help='print out information instead of downloading', required=False)
@@ -304,7 +316,7 @@ class ArgsHandler:
 
 		# Fetch
 		lst_of_pkgs: list[tuple[str, int, str], ...] = ApiParser().main(
-			patches=self.args.patches,
+			version=self.args.version,
 			types=['game_pkgs', 'audio_pkgs'] if self.args.types == 'all' else [self.args.types],
 			languages=self.args.languages,
 			print_info=self.args.info)
@@ -320,6 +332,7 @@ class ArgsHandler:
 		file_hash: list[tuple[str, str]] = downloader.download_files(items=lst_of_pkgs)
 
 		# CRC check
+		print('\033[F', end='')	# Move the cursor up one line
 		for filepath, md5 in file_hash:
 			CheckHash.check_md5(filepath=filepath, expected_md5=md5)
 
