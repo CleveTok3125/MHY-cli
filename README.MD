@@ -1,3 +1,6 @@
+# About new download method
+The [Hi3Helper.Sophon](https://github.com/CollapseLauncher/Hi3Helper.Sophon) library is written in C# which would take some time to integrate into a Python project or rewrite. So I took advantage of existing C# front end projects and ported them to Linux (at least no need to run wine every time). See [HK4E-Sophon-Downloader](https://github.com/CleveTok3125/HK4E-Sophon-Downloader-Linux/).
+
 # Install
 
 ## Clone repository

@@ -547,6 +547,6 @@ def main():
 
 if __name__ == "__main__":
     print(
-        "\nNotice: This tool uses old download method and api. It will not be able to download the latest version of some games. New download method may be implemented in the future.\n"
+        "\nNotice: This tool uses old download method and api. It will not be able to download the latest version of some games.\n"
     )
     main()
