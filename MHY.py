@@ -2,6 +2,7 @@ import requests
 from requests.exceptions import HTTPError, Timeout, RequestException
 from tqdm import tqdm
 
+from typing import TypedDict
 import json, re, os, sys
 import hashlib
 import argparse
@@ -353,7 +354,9 @@ class Downloader:
         headers = {}
         if downloaded > 0:
             headers["Range"] = f"bytes={downloaded}-"
-            print(f"Resuming {filename} from byte {downloaded} ({downloaded/1073741824:.2f}GB)")
+            print(
+                f"Resuming {filename} from byte {downloaded} ({downloaded / 1073741824:.2f}GB)"
+            )
 
         try:
             with requests.get(
@@ -417,7 +420,15 @@ class Downloader:
 
 class CheckHash:
     @staticmethod
-    def calculate_md5(filepath: str) -> str:
+    def calculate_md5(filepath: str, chunk_size: int = 4096) -> str:
+        hash_md5 = hashlib.md5()
+        with open(filepath, "rb") as f:
+            for chunk in iter(lambda: f.read(chunk_size), b""):
+                hash_md5.update(chunk)
+        return hash_md5.hexdigest()
+
+    @staticmethod
+    def calculate_md5_ui(filepath: str) -> str:
         hash_md5: _hashlib.HASH = hashlib.md5()
         file_size = os.path.getsize(filepath)
 
@@ -435,7 +446,7 @@ class CheckHash:
         print(f"\nRunning CRC: {filepath}.", end="\n")
 
         try:
-            file_hash: str = CheckHash.calculate_md5(filepath)
+            file_hash = CheckHash.calculate_md5_ui(filepath)
         except KeyboardInterrupt:
             print("CRC canceled.")
             OSManager.exit(0)
@@ -453,6 +464,137 @@ class CheckHash:
             return True
         print(f"CRC Failed! Expected {expected_md5}, got {file_hash}")
         return False
+
+
+class IntegrityResult(TypedDict):
+    filename: str
+    filesize: int
+    expected_filesize: int
+    md5: str
+    expected_md5: str
+    ok: bool
+    status: str
+
+
+class IntegrityChecker:
+    @staticmethod
+    def combine(pkg_files: list) -> list[dict]:
+        combined: list = []
+        for pkg_file in pkg_files:
+            try:
+                with open(pkg_file, "r", encoding="utf-8") as file:
+                    combined.extend(file.read().splitlines())
+            except FileNotFoundError:
+                # Nếu pkg_file không tồn tại, in cảnh báo và tiếp tục
+                print(f"WARNING: Package file '{pkg_file}' not found. Skipping.")
+                continue
+
+        parsed_list = [json.loads(line) for line in combined]
+        return parsed_list
+
+    @staticmethod
+    def parse_item(item: dict, game_dir: str) -> (str, str, int):
+        remoteName: str = item["remoteName"]
+        expected_md5: str = item["md5"]
+        expected_filesize: int = item["fileSize"]
+
+        local_path = os.path.join(game_dir, remoteName)
+        return local_path, expected_md5, expected_filesize
+
+    @staticmethod
+    def check(game_dir: str, pkg_files: list, stop_on_mismatch: bool = True) -> None:
+        combined_pkg_files = IntegrityChecker.combine(pkg_files)
+
+        if not combined_pkg_files:
+            print("There is no file information to check.")
+            return []
+
+        results: list[IntegrityResult] = []
+
+        all_filenames = [
+            os.path.basename(item["remoteName"]) for item in combined_pkg_files
+        ]
+        avg_file_len = int(sum(len(f) for f in all_filenames) / len(all_filenames))
+
+        with tqdm(
+            total=len(combined_pkg_files),
+            desc="Overall Progress",
+            unit=" files",
+        ) as main_bar:
+            for item in combined_pkg_files:
+                local_path, expected_md5, expected_filesize = (
+                    IntegrityChecker.parse_item(item, game_dir)
+                )
+                filename = os.path.basename(local_path)
+
+                main_bar.set_description(f"Checking: {filename.ljust(avg_file_len)}")
+                if not os.path.exists(local_path):
+                    result = IntegrityResult(
+                        filename=filename,
+                        filepath=local_path,
+                        filesize=0,
+                        expected_filesize=expected_filesize,
+                        md5="",
+                        expected_md5=expected_md5,
+                        ok=False,
+                        status="NOT_FOUND",
+                    )
+                else:
+                    actual_filesize = os.path.getsize(local_path)
+                    actual_md5 = CheckHash.calculate_md5(local_path)
+
+                    is_ok = (actual_filesize == expected_filesize) and (
+                        actual_md5.lower() == expected_md5.lower()
+                    )
+
+                    status = "OK"
+                    if not is_ok:
+                        if actual_filesize != expected_filesize:
+                            status = "SIZE_MISMATCH"
+                        elif actual_md5.lower() != expected_md5.lower():
+                            status = "MD5_MISMATCH"
+                        else:
+                            status = "UNKNOWN_ERROR"
+
+                    result = IntegrityResult(
+                        filename=filename,
+                        filepath=local_path,
+                        filesize=actual_filesize,
+                        expected_filesize=expected_filesize,
+                        md5=actual_md5,
+                        expected_md5=expected_md5,
+                        ok=is_ok,
+                        status=status,
+                    )
+
+                results.append(result)
+
+                if stop_on_mismatch and not result["ok"]:
+                    main_bar.set_description(f"Failed: {filename} - {result['status']}")
+                    break
+
+                main_bar.update(1)
+        return results
+
+    @staticmethod
+    def run(
+        game_dir: str,
+        pkg_files: list,
+        stop_on_mismatch: bool = True,
+        dump_results: str = False,
+    ):
+        try:
+            results = IntegrityChecker.check(
+                game_dir=game_dir, pkg_files=pkg_files, stop_on_mismatch=stop_on_mismatch
+            )
+            print("Integrity check done.")
+        except KeyboardInterrupt:
+            print("Integrity check canceled.")
+            results = []
+
+        if dump_results and results:
+            with open("results.json", "w") as file:
+                json.dump(results, file, indent=4, ensure_ascii=False)
 
 
 class ArgsHandler:
@@ -503,6 +645,33 @@ class ArgsHandler:
             required=False,
         )
 
+        self.subparsers = self.parser.add_subparsers(dest="command")
+
+        self.verify_parser = self.subparsers.add_parser(
+            "verify", help="Check game files integrity"
+        )
+        self.verify_parser.add_argument(
+            "game_dir",
+            type=str,
+        )
+        self.verify_parser.add_argument(
+            "pkg_files",
+            nargs="+",
+            type=str,
+        )
+        self.verify_parser.add_argument(
+            "--ignore-mismatch",
+            action="store_true",
+            default=False,
+            required=False,
+        )
+        self.verify_parser.add_argument(
+            "--export-result",
+            type=str,
+            metavar="FILENAME",
+            required=False,
+        )
+
         self.args: argparse.Namespace = self.parser.parse_args()
 
     def listener(self):
@@ -513,6 +682,15 @@ class ArgsHandler:
         # GameList
         if self.args.game_list:
             GameListMaker().main()
+            return
+
+        if self.args.command == "verify":
+            IntegrityChecker.run(
+                game_dir=self.args.game_dir,
+                pkg_files=self.args.pkg_files,
+                stop_on_mismatch=not self.args.ignore_mismatch,
+                dump_results=self.args.export_result,
+            )
             return
 
         # Fetch
